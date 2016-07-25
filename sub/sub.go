@@ -7,7 +7,13 @@ import (
 	"github.com/go-mangos/mangos/transport/ipc"
 	"github.com/go-mangos/mangos/transport/tcp"
 	"strings"
+	"sync"
 )
+
+type topicHandlerMap struct {
+	M        sync.RWMutex
+	handlers map[string]ResponseHandler
+}
 
 type Client struct {
 	url  string
@@ -15,6 +21,13 @@ type Client struct {
 }
 
 type ResponseHandler func([]byte)
+
+var topicHandlers topicHandlerMap
+var isReading bool
+
+func init() {
+	topicHandlers.handlers = make(map[string]ResponseHandler)
+}
 
 func (self *Client) Connect(url string) error {
 
@@ -42,12 +55,19 @@ func (self *Client) Subscribe(topic string, handler ResponseHandler) error {
 		return err
 	}
 
-	go subscribeRoutine(self, topic, handler)
+	if !isReading {
+		go subscribeRoutine(self, handler)
+	}
+
+	topicHandlers.M.Lock()
+	topicHandlers.handlers[topic] = handler
+	topicHandlers.M.Unlock()
 
 	return nil
 }
 
-func subscribeRoutine(self *Client, topic string, handler ResponseHandler) {
+func subscribeRoutine(self *Client, handler ResponseHandler) {
+	isReading = true
 	var msg []byte
 	var err error
 	for {
@@ -55,7 +75,24 @@ func subscribeRoutine(self *Client, topic string, handler ResponseHandler) {
 			continue
 		}
 
+		msgString := string(msg)
+
+		var topic string
+
+		if strings.ContainsAny(msgString, "|") {
+			topic = msgString[0:strings.Index(msgString, "|")]
+		}
+
 		msgTopic := strings.Replace(string(msg), topic+"|", "", -1)
-		handler([]byte(msgTopic))
+
+		topicHandlers.M.RLock()
+		handleFunc := topicHandlers.handlers[topic]
+
+		if handleFunc != nil {
+			handleFunc([]byte(msgTopic))
+		}
+
+		topicHandlers.M.RUnlock()
+
 	}
 }
